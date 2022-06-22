@@ -1,0 +1,13 @@
+case#;Age;Gender;PMI;Diagnosis;ApoE;Braak;Description
+AD1_AD2 donor 1;91;Male;8;AD;34;6;Numerous diffuse and neuritic Abeta plaque
+AD1_AD2 donor 2;83,8;Male;10;AD;34;6;Numerous diffuse and neuritic Abeta plaque
+AD3_AD4 donor 1;67,8;Female;21;AD;44;6;Numerous diffuse and neuritic Abeta plaque
+AD3_AD4 donor 2;83;Female;34;AD;33;6;Numerous diffuse and neuritic Abeta plaque
+AD5_AD6 donor 1;73;Male;9,5;AD;44;6;Numerous diffuse and neuritic Abeta plaque
+AD5_AD6 donor 2;74,6;Male;30;AD;34;6;Numerous diffuse and neuritic Abeta plaque
+Ct1_Ct2 donor 1;67,3;Female;24;Control;33;NR;Occasional diffuse plaque in cortex
+Ct1_Ct2 donor 2;82,7;Female;28,5;Control;33;NR;None
+Ct3_Ct4 donor 1;72,6;Male;42,5;Control;33;NR;None
+Ct3_Ct4 donor 2;75,6;Male;46;Control;34;NR;None
+Ct5_Ct6 donor 1;77,5;Male;53,5;Control;33;NR;None
+Ct5_Ct6 donor 2;82,7;Male;27;Control;24;NR;None
