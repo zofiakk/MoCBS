@@ -1,0 +1,891 @@
+---
+title: "Final project"
+author: "Kochańska Zofia"
+date: "11 06 2022"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true 
+    theme: united
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+---
+
+This notebook can be divided into 3 parts where after running them one time, they can all be run separately. The first one deals with preparation of the data such as normalization and getting rid of batch effects. Seurat objects prepared thanks to those operations are then saved as rds files. The second one looks for differentially expressed genes (DEGs) and saves them to csv files. The last one creates multitude of plots which try to capture the nature of analyzed data.
+
+```{r setup, include=FALSE}
+
+library(knitr)
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+library(ggplot2)
+library(dplyr)
+library(sctransform)
+library(cowplot)
+library(magrittr)
+library(BRETIGEA)
+library(dittoSeq)
+library(Seurat) 
+```
+
+# Data preparation
+## Load the data
+```{r cache=TRUE}
+counts<-read.table("data/scRNA_rawCounts.tsv",header= TRUE, sep = "\t")
+meta<- read.table("data/scRNA_metadata.tsv",header= TRUE, sep = "\t")
+supp<- read.csv("data/supp_data.csv" ,header= TRUE, sep = ";", stringsAsFactors=FALSE)
+```
+
+## Preaparing the data
+```{r}
+meta_changed<- meta[,c(1:3,8, 9)]
+meta_changed$patient<- as.character(meta_changed$patient)
+rownames(meta_changed)<- meta_changed$sampleID
+colnames(meta_changed)[c(2,3,5)]<- c("Batch", "Patient","Diagnosis") 
+meta_changed$Diagnosis<- as.character(meta_changed$Diagnosis)
+meta_changed$Diagnosis<- ifelse(meta_changed$Diagnosis == "ct", "Control", meta_changed$Diagnosis)
+meta_changed2<- meta_changed[meta_changed$Patient != "AD-un",  ]  
+meta_changed2<- meta_changed2[meta_changed2$Patient != "Ct-un",  ]
+
+supp_changed <- supp
+supp_changed$patient<- c("AD1","AD2", "AD3", "AD4" ,"AD5", "AD6" , "Ct1", "Ct2", "Ct3", "Ct4", "Ct5", "Ct6")
+supp_changed2<- supp_changed[!is.na(supp_changed$ApoE), c(9,2:6)]
+colnames(supp_changed2)[c(1,3)]<- c("Patient", "Sex")
+# Removing patients with ApoE different than 33 or 34
+supp_changed3<- supp_changed2[supp_changed2$ApoE != "24",  ]
+supp_changed3<- supp_changed3[supp_changed3$ApoE != "44",  ]
+
+
+
+meta_changed2<- meta_changed2[meta_changed2$Patient %in% supp_changed3$Patient, ]
+
+counts2<- counts
+rownames(counts2)<- counts2$geneName
+counts2$geneName<- NULL
+
+meta_changed3<- dplyr::inner_join(meta_changed2, supp_changed3[,c(1:4,6)], by="Patient") 
+rownames(meta_changed3)<- meta_changed3$sampleID
+meta_changed3$sampleID<- NULL 
+meta_changed3$TAG<- rownames(meta_changed3)
+meta_changed3$ApoE %<>% factor
+meta_changed3$Sex %<>% factor
+meta_changed3$Batch %<>% factor
+
+counts3<- counts2[,colnames(counts2) %in% rownames(meta_changed3)]
+```
+
+## Seurat object
+```{r fig.height=7, fig.width=13, cache=TRUE}
+grub <-  CreateSeuratObject(counts = counts3, project = "grub", min.cells = 3, min.features = 200, meta.data = meta_changed3)
+
+grub[["percent.mt"]] <- PercentageFeatureSet(grub, pattern = "^MT-")
+
+# Visualize the data
+VlnPlot(grub, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+
+plot1 <- FeatureScatter(grub, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(grub, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 +plot2
+
+# There is no need to filter cells because all of the data is in an acceptable range
+range(grub$nFeature_RNA)
+range(grub$percent.mt)
+```
+
+## Normalize the object
+```{r fig.height=7, fig.width=13, cache=TRUE}
+# Normalize data with default settings
+grub<- NormalizeData(object = grub)
+
+# Find the most variable genes
+grub <- FindVariableFeatures(object = grub, selection.method = "vst", nfeatures = 2000, x.low.cutoff = 0.0125, x.high.cutoff = 3,  y.cutoff = 0.5) 
+
+top10_varfeatures <- head(VariableFeatures(grub), 10)
+plot1 <- VariableFeaturePlot(grub)
+plot2 <- LabelPoints(plot = plot1, points = top10_varfeatures, repel = TRUE)
+plot1 + plot2
+```
+
+## ScaleData and Run PCA, UMAP, TSNE 
+```{r fig.height=7, fig.width=11, cache=TRUE}
+all.genes <- rownames(grub)  
+grub <- ScaleData(object = grub, features = all.genes)
+grub <- RunPCA(object = grub, features = VariableFeatures(object = grub))
+
+
+ElbowPlot(grub, ndims = 50)
+grub <- RunUMAP(grub, dims = 1:10)
+grub <- RunTSNE(grub, dims = 1:10)
+
+dittoDimPlot( object = grub, "Batch",reduction = "pca", color.panel = dittoColors()[c(39,15,7,36,25,17)])
+dittoDimPlot( object = grub, "Batch",reduction = "umap" ,color.panel = dittoColors()[c(39,15,7,36,25,17)])
+dittoDimPlot( object = grub, "Batch",reduction = "tsne" ,color.panel = dittoColors()[c(39,15,7,36,25,17)])
+
+dittoDimPlot( object = grub, "cellType",reduction = "pca")
+dittoDimPlot( object = grub,  "cellType",reduction = "umap")
+dittoDimPlot( object = grub,  "cellType",reduction = "tsne")
+```
+
+
+## PCA heatmaps
+```{r multi-heatmap, fig.height=15, fig.width=9}
+DimHeatmap(grub, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+
+```{r echo =FALSE , include=FALSE}
+# Save the object before changing cell labels and running SCT transform which scales and normalizes the data
+saveRDS(grub, file = "grub_original.rds")
+```
+
+## SCT transform- scaling, normalization and batch effects
+```{r cache=TRUE}
+grub.list <- SplitObject(grub, split.by = "Batch")
+for (i in 1:length(grub.list)) {
+    grub.list[[i]] <- SCTransform(grub.list[[i]], verbose = FALSE) 
+}
+ 
+grub.features <- SelectIntegrationFeatures(object.list = grub.list, nfeatures = 3000)
+options(future.globals.maxSize = 1000 * 1024^3) 
+grub.list <- PrepSCTIntegration(object.list = grub.list, anchor.features = grub.features, verbose = FALSE)
+
+grub.anchors <- FindIntegrationAnchors(object.list = grub.list, normalization.method = "SCT", anchor.features = grub.features, verbose = FALSE)
+
+grub.integrated <- IntegrateData(anchorset =grub.anchors, normalization.method = "SCT", verbose = FALSE)
+
+DefaultAssay(grub.integrated) <- "integrated"
+```
+
+## Quality control and visualization
+```{r fig.height=7, fig.width=11, cache=TRUE}
+grub.integrated <- RunPCA(grub.integrated, verbose = FALSE)
+
+ElbowPlot(grub.integrated, ndims =50)
+
+grub.integrated <- RunUMAP(grub.integrated, dims = 1:10)
+grub.integrated <- RunTSNE(grub.integrated, dims = 1:10)
+ 
+#QC plots
+p1 <- DimPlot(grub.integrated, reduction = "umap", group.by = "Batch")
+p2 <- DimPlot(grub.integrated, reduction = "umap", group.by = "Diagnosis")
+plot_grid(p1, p2) 
+
+VlnPlot(grub.integrated, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+
+## Cell Identity analysis using human brain markers from BRETIGEA
+
+```{r fig.height=7, fig.width=11, cache=TRUE}
+all.genes <- rownames(grub.integrated)  
+brain_markers<- markers_df_human_brain
+brain_markers<- brain_markers[brain_markers$markers %in% all.genes,]
+
+slice <- dplyr::slice
+
+brain_markers2<-  brain_markers  %>%
+  group_by(cell) %>%
+  slice(1:200)
+neu_markers<- list(brain_markers2$markers[brain_markers2$cell == "neu"]) 
+end_markers<- list(brain_markers2$markers[brain_markers2$cell == "end"]) 
+ast_markers<- list(brain_markers2$markers[brain_markers2$cell == "ast"]) 
+mic_markers<- list(brain_markers2$markers[brain_markers2$cell == "mic"]) 
+oli_markers<- list(brain_markers2$markers[brain_markers2$cell == "oli"]) 
+opc_markers<- list(brain_markers2$markers[brain_markers2$cell == "opc"]) 
+
+grub <- grub.integrated
+DefaultAssay(grub) <- "SCT" 
+
+grub<-AddModuleScore(object=grub, features =  neu_markers, pool = NULL,  nbin = 24,  ctrl = 100,  k = FALSE,  assay = NULL, name = 'neu',  seed = 1,  search = FALSE)
+grub<-AddModuleScore(object=grub, features =  end_markers,  pool = NULL,  nbin = 24,  ctrl = 100,  k = FALSE,  assay = NULL,  name = 'end',  seed = 1,  search = FALSE)
+grub<-AddModuleScore(object=grub,  features = ast_markers,  pool = NULL,  nbin = 24,  ctrl = 100,  k = FALSE,  assay = NULL,  name = 'ast',  seed = 1,  search = FALSE)
+grub<-AddModuleScore(object=grub, features =  mic_markers,  pool = NULL,  nbin = 24,  ctrl = 100,  k = FALSE,  assay = NULL,  name = 'mic',  seed = 1,  search = FALSE)
+grub<-AddModuleScore(object=grub, features =  oli_markers,  pool = NULL,  nbin = 24,  ctrl = 100,  k = FALSE,  assay = NULL,  name = 'oli',  seed = 1,  search = FALSE)
+grub<-AddModuleScore(object=grub, features =  opc_markers,  pool = NULL,  nbin = 24,  ctrl = 100,  k = FALSE,  assay = NULL,  name = 'opc',  seed = 1,  search = FALSE)
+
+dittoDimPlot( object = grub, "neu1",reduction = "umap")
+dittoDimPlot( object = grub, "end1",reduction = "umap")
+dittoDimPlot( object = grub, "ast1",reduction = "umap")
+dittoDimPlot( object = grub, "mic1",reduction = "umap")
+dittoDimPlot( object = grub, "oli1",reduction = "umap")
+dittoDimPlot( object = grub, "opc1",reduction = "umap")
+```
+
+
+## New cell types
+```{r}
+grub_new_meta<- grub@meta.data
+
+# cell_type based on maximum score
+grub_new_meta$cell_type<- names(grub_new_meta[, 16:21])[apply(grub_new_meta[, 16:21],1,which.max)]
+table(grub_new_meta$cell_type)
+```
+
+
+## Normalize the cell types
+```{r}
+# Max and second max score
+grub_new_meta$x1<- apply(grub_new_meta[, 16:21], 1, max)
+grub_new_meta$x2<- apply(grub_new_meta[, 16:21], 1, function(x) x[order(x)[5]]) 
+
+# Get the cell type value = (x1-x2)/x1
+grub_new_meta$x1_x2<- (grub_new_meta$x1 - grub_new_meta$x2)/grub_new_meta$x1  
+
+# If the value is < 0.2 then this cell is a hybrid
+grub_new_meta$x1_x2<- ifelse(grub_new_meta$x1_x2 < 0.2, 1,0) 
+grub_new_meta$cell_type2<- grub_new_meta$cell_type
+grub_new_meta$cell_type2<- ifelse(grub_new_meta$x1_x2 == 1, "hybrid", grub_new_meta$cell_type2 )
+
+table(grub_new_meta$cell_type2) 
+
+# Remove numbers from cell types
+grub_new_meta$cell_type<- gsub("1", "", grub_new_meta$cell_type)
+grub_new_meta$cell_type2<- gsub("1", "", grub_new_meta$cell_type2)
+
+write.csv(grub_new_meta, file="Cell_id_scores.csv")
+```
+
+
+```{r fig.height=7, fig.width=11}
+grub@meta.data<- grub_new_meta
+
+
+# Tables showing differences beetween cell type assignment
+table(grub_new_meta$cellType, grub_new_meta$cell_type)
+# Grubman et. all vs Belonwu et. all
+table(grub_new_meta$cellType, grub_new_meta$cell_type2)
+table(grub_new_meta$cell_type, grub_new_meta$cell_type2)      
+```
+      
+## UMAP plots for different cell asignments
+```{r fig.height=7, fig.width=11}      
+dittoDimPlot( 'cellType', object = grub, reduction = "umap", color.panel = c("#E69F00" ,"#dd1c77","#56B4E9" ,"#009E73", "#F0E442","#D55E00", "#0072B2","#666666" ))
+dittoDimPlot( 'cell_type', object = grub, reduction = "umap", color.panel = c("#E69F00" ,"#56B4E9" ,"#009E73", "#F0E442", "#D55E00" , "#0072B2"))
+dittoDimPlot( 'cell_type2', object = grub, reduction = "umap", color.panel = c("#E69F00" ,"#56B4E9" ,"#dd1c77" ,"#009E73", "#F0E442",  "#D55E00", "#0072B2"))
+```
+
+
+```{r fig.height=7, fig.width=11}
+dittoBarPlot(grub, "cellType", group.by = "Patient",color.panel = c("#E69F00" ,"#dd1c77","#56B4E9" ,"#009E73", "#F0E442","#D55E00", "#0072B2","#666666" ), main="Grubman et. all") +theme(title = element_text(size=25, vjust=0.5))
+dittoBarPlot(grub, "cell_type", group.by = "Patient",color.panel = c("#E69F00" ,"#56B4E9" ,"#009E73", "#F0E442", "#D55E00" , "#0072B2"))
+dittoBarPlot(grub, "cell_type2", group.by = "Patient",color.panel = c("#E69F00" ,"#56B4E9" , "#009E73", "#dd1c77", "#F0E442",  "#D55E00", "#0072B2"), main="Belonwu et. all method") +theme(title = element_text(size=25, vjust=0.5))
+```
+
+
+
+```{r}
+# Save the object with new labels
+saveRDS(grub, file = "grub_new_labels_full.rds")
+grub_no_hybrids <- subset(grub, subset = cell_type2 != "hybrid")
+saveRDS(grub_no_hybrids, file = "grub_new_label_no_hybrid.rds")
+```
+
+
+```{r}
+# Clear the memory
+rm(list = ls(all.names = TRUE))
+gc()
+```
+
+
+# DGE ussing limma
+```{r}
+library(readxl)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(limma)
+library(edgeR)
+library(Seurat)
+```
+
+
+## Load the data
+```{r }
+grub_dge<- readRDS("grub_new_label_no_hybrid.rds")
+
+grub_dge$diag_apoe_cell<- paste0(grub_dge$Diagnosis,"_", grub_dge$ApoE,"_",grub_dge$cell_type)
+
+Idents(grub_dge) <- "diag_apoe_cell"
+DefaultAssay(grub_dge)<- "SCT"
+
+grub_dge$diag_apoe_cell<- as.factor(grub_dge$diag_apoe_cell)
+grub_dge$Batch<- as.factor(grub_dge$Batch)
+
+```
+
+## Create the design
+```{r}
+#Create design
+design<- model.matrix(~0 + diag_apoe_cell+ Sex, data = grub_dge@meta.data)   
+colnames(design) <- gsub("diag_apoe_cell", "", colnames(design))
+colnames(design) <- gsub("Sex", "", colnames(design))
+```
+
+```{r cache=TRUE}
+# Filter and normalize
+dge <-  as.matrix(GetAssayData(grub_dge, slot="counts")) 
+dge <- DGEList(counts= dge)
+keep <- filterByExpr(dge, design)
+summary(keep) 
+dge <- dge[keep, ,keep.lib.sizes=FALSE]  
+dge <- calcNormFactors(dge, method = "TMMwsp")
+```
+
+
+```{r cache=TRUE}
+vm<- voom(dge, design)  
+
+fit <- lmFit(vm, design)
+
+contrasts.matrix<-  makeContrasts(ast33= AD_33_ast - Control_33_ast, ast34 = AD_34_ast - Control_34_ast, mic33= AD_33_mic - Control_33_mic, mic34= AD_34_mic - Control_34_mic, neu33= AD_33_neu - Control_33_neu, neu34= AD_34_neu - Control_34_neu, oli33= AD_33_oli - Control_33_oli, oli34= AD_34_oli - Control_34_oli, opc33= AD_33_opc - Control_33_opc, opc34= AD_34_opc - Control_34_opc, levels = colnames(design))
+fit <- contrasts.fit(fit, contrasts = contrasts.matrix) 
+fit <- eBayes(fit)
+
+grub_dge$cell_apoe<- paste0(grub_dge$cell_type,grub_dge$ApoE)
+unique(grub_dge$cell_apoe)
+delist_key<- c("ast33", "ast34", "mic33",  "mic34", 
+               "neu33" ,"neu34", "oli33" ,"oli34", "opc33" , "opc34" )
+
+```
+
+```{r cache=TRUE}
+library(stringr)
+markers2= NULL
+markers3= NULL
+for(key in delist_key){
+  apoe<- str_sub(key,-2,-1) 
+  c_type<- gsub(apoe,"",key) 
+  markers<-  topTable(fit, coef= key, sort.by = "P", number = Inf, adjust.method = "BH")
+  markers$group<- key
+  markers$ApoE<- apoe
+  markers$cell_type<- c_type
+  markers$gene<- rownames(markers)
+  markers$dir<- ifelse(markers$logFC < 0, "neg","pos")
+  colnames( markers)[c(1,4,5)] <- c("avg_logFC", "p_val", "p_val_adj")
+  markers2<- rbind(markers2, markers)  
+  markers<- subset(markers, p_val_adj < 0.05 & abs(avg_logFC) > 0.25)  
+  markers3<- rbind(markers3, markers) 
+}
+```
+
+
+## Save genes for APOE 33 and 34
+```{r}
+table(markers3$group, markers3$dir)
+de33_markersOG<- markers2[markers2$ApoE == "33",]
+de34_markersOG<- markers2[markers2$ApoE == "34",]
+write.csv(de33_markersOG, file="grub_DEG33.csv") 
+write.csv(de34_markersOG, file="grub_DEG34.csv") 
+```
+
+
+```{r}
+# Clear the memory
+rm(list = ls(all.names = TRUE))
+gc()
+```
+
+
+# Figures
+```{r}
+library(dittoSeq)
+library(dplyr)
+library(UpSetR)
+library(Seurat)
+library(pheatmap)
+library(RColorBrewer)
+library(Hmisc)
+library(stringr)
+library(grid)
+library(ComplexHeatmap)
+```
+
+
+## Load previously changed data- without hybrids
+```{r}
+grub<- readRDS( "grub_new_label_no_hybrid.rds")
+meta<- read.table("data/scRNA_metadata.tsv",header= TRUE, sep = "\t")
+supp<- read.csv("data/supp_data.csv" ,header= TRUE, sep = ";", stringsAsFactors=FALSE)
+DefaultAssay(grub) <- "SCT" 
+
+
+grub$Braak<- ifelse(grub$Diagnosis == "AD", "6", "NR")
+grub$Plaque<- ifelse(grub$Diagnosis == "AD", "Numerous diffuse and neuritic Abeta plaque", "None")
+grub$Plaque<- ifelse(grub$Patient == "Ct1", "Occasional diffuse plaque in cortex", grub$Plaque)
+grub$CERAD<- ifelse(grub$Plaque == "Numerous diffuse and neuritic Abeta plaque", "1", "4") #1=definite, 4=No AD
+grub$CERAD<- ifelse(grub$Plaque == "Occasional diffuse plaque in cortex", "3",grub$CERAD) #3=possible, 2=probable
+
+grub$CERAD<- as.factor(grub$CERAD)
+grub$Braak<- as.factor(grub$Braak)
+
+
+library(Hmisc)
+grub$cell_type<- capitalize(grub$cell_type)
+grub$ApoE<- ifelse(grub$ApoE == "33", "3/3", grub$ApoE)
+grub$ApoE<- ifelse(grub$ApoE == "34", "3/4", grub$ApoE)
+
+grub$diag_cell_apoe<- paste0(grub$Diagnosis,"_", grub$cell_type, "_", grub$ApoE)
+```
+
+## Load the data with original cell asignments
+```{r}
+grub0<-readRDS("grub_original.rds")
+
+grub0 <- subset(grub0, subset = TAG %in% grub$TAG)
+DefaultAssay(grub0)<- "RNA"
+
+grub0@meta.data<-dplyr::inner_join(grub0@meta.data, grub@meta.data[,c(12,22,26:29)], by="TAG") 
+
+grub0$cell_type<- capitalize(grub0$cell_type)
+grub0$ApoE<- ifelse(grub0$Patient == "AD1", "3/4", grub0$ApoE)
+grub0$ApoE<- ifelse(grub0$Patient == "AD2", "3/4", grub0$ApoE)
+grub0$ApoE<- ifelse(grub0$Patient == "AD4", "3/3", grub0$ApoE)
+grub0$ApoE<- ifelse(grub0$Patient == "AD6", "3/4", grub0$ApoE)
+grub0$ApoE<- ifelse(grub0$Patient == "Ct1", "3/3", grub0$ApoE)
+grub0$ApoE<- ifelse(grub0$Patient == "Ct2", "3/3", grub0$ApoE)
+grub0$ApoE<- ifelse(grub0$Patient == "Ct3", "3/3", grub0$ApoE)
+grub0$ApoE<- ifelse(grub0$Patient == "Ct4", "3/4", grub0$ApoE)
+grub0$ApoE<- ifelse(grub0$Patient == "Ct5", "3/3", grub0$ApoE)
+```
+
+## Data with new cell assignments- UMAP plots
+```{r fig.height=7, fig.width=11}
+#Diagnosis
+dittoDimPlot( object = grub, "Diagnosis",reduction = "umap",  cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"], legend.title = "Diagnosis",main = "Diagnosis", color.panel = c("#007756", "#D5C711"))  + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+#Sex
+dittoDimPlot( object = grub, "Sex", reduction = "umap", cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"],color.panel = c("#A04700", "#005685" ), legend.title = "Sex", main = "Sex" ) + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+#ApoE
+dittoDimPlot( object = grub,  "ApoE", reduction = "umap",  cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"],color.panel =c( "#AD7700", "#1C91D4","#9AD2F2"), legend.title = "APOE", main = "APOE") + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+#Batch
+dittoDimPlot( object = grub,  "Batch", reduction = "umap", cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"],color.panel = dittoColors()[c(39,15,7,36,25,17)], legend.title = "Batch",  main = "Batch")  + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+#Celltype
+table(grub$cell_type)
+
+dittoDimPlot( object = grub,  "cell_type", reduction = "umap", do.label= TRUE,labels.size = 14, cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"], main= "Cell type",color.panel = c("#E69F00","#0072B2", "aquamarine2","#D55E00","#CC79A7")) + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(), legend.position="none", axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+#Patient
+table(grub$Patient)
+
+dittoDimPlot( object = grub,  "Patient", reduction = "umap", cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"], legend.title = "Subject",  main = "Subject") + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+
+#CERAD
+dittoDimPlot( object = grub,   "CERAD", reduction = "umap", cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"], legend.title =  "CERAD", color.panel = c(dittoColors()[20],dittoColors()[22],dittoColors()[23]), main =  "CERAD") + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+```
+
+
+## Data with originall cell asignments and without SCTransform- UMAP plots
+```{r fig.height=7, fig.width=11}
+#Diagnosis
+dittoDimPlot( object = grub0, "Diagnosis",reduction = "umap",   cells.use = colnames( grub0)[grub0$cell_type != "End"& grub0$ApoE != "44"], legend.title = "Diagnosis",main = "Diagnosis", color.panel = c("#007756", "#D5C711")) + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+#Sex
+dittoDimPlot( object = grub0, "Sex", reduction = "umap",  cells.use = colnames( grub0)[grub0$cell_type != "End"& grub0$ApoE != "44"],color.panel = c("#A04700", "#005685" ), legend.title = "Sex",main = "Sex" ) + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+#ApoE
+dittoDimPlot( object = grub0,  "ApoE", reduction = "umap",  cells.use = colnames( grub0)[grub0$cell_type != "End"& grub0$ApoE != "44"],color.panel =c( "#AD7700", "#1C91D4","#9AD2F2"), legend.title = "APOE", main = "APOE") +theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+#Batch
+dittoDimPlot( object = grub0,  "Batch", reduction = "umap", cells.use = colnames( grub0)[grub0$cell_type != "End"& grub0$ApoE != "44"],color.panel = dittoColors()[c(39,15,7,36,25,17)], legend.title = "Batch",  main = "Batch")+ theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+#Celltype
+dittoDimPlot( object = grub0,  "cell_type", reduction = "umap", do.label= TRUE,labels.size = 14,  cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"], main= "Cell type",color.panel = c("#E69F00","#0072B2", "aquamarine2","#D55E00","#CC79A7")) + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(), legend.position="none", axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+#Patient
+table(grub$Patient)
+
+dittoDimPlot( object = grub0,  "Patient", reduction = "umap", cells.use = colnames( grub0)[grub0$cell_type != "End" & grub0$ApoE != "44"], legend.title = "Subject",  main = "Subject") + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+
+#Plaque
+dittoDimPlot( object = grub0,   "CERAD", reduction = "umap", cells.use = colnames( grub0)[grub0$cell_type != "End" & grub0$ApoE != "44"], legend.title =  "CERAD",  color.panel = c(dittoColors()[20],dittoColors()[22],dittoColors()[23]),  main =  "CERAD") + theme(axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text.x = element_blank(), axis.ticks.x = element_blank(),  axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.background = element_rect(colour = "black", size=1.5))
+
+```
+
+## Gene expression data
+```{r}
+de33_markers_all<- read.csv("grub_DEG33.csv",header= TRUE, sep = ",", stringsAsFactors=FALSE)
+de34_markers_all<- read.csv("grub_DEG34.csv",header= TRUE, sep = ",", stringsAsFactors=FALSE)
+de33_markers_all$X <- NULL
+de34_markers_all$X<- NULL
+
+#remove MALAT1- reported to be an artifact by Grubman et. all
+de33_markers_all<-de33_markers_all[de33_markers_all$gene != "MALAT1",]
+de34_markers_all<- de34_markers_all[de34_markers_all$gene != "MALAT1",]
+```
+
+## Number of DEGs for different cells and APOE genotypes
+```{r fig.height=7, fig.width=11}
+de33_markers<- subset(de33_markers_all, p_val_adj < 0.05 & abs(avg_logFC) > 0.25)
+de34_markers<- subset(de34_markers_all, p_val_adj < 0.05 & abs(avg_logFC) > 0.25)
+
+all_de_num<- rbind(as.data.frame(table(de33_markers$group, de33_markers$dir)),as.data.frame(table(de34_markers$group, de34_markers$dir)))
+
+all_de_num$Freq<- ifelse(all_de_num$Var2 == "neg", all_de_num$Freq * -1,all_de_num$Freq)
+all_de_num$ApoE<-  str_sub(all_de_num$Var1,-2,-1)
+
+all_de_num$Celltype<-  gsub(all_de_num$ApoE,"",all_de_num$Var1)
+all_de_num$Celltype<-  gsub(34,"",all_de_num$Celltype)
+
+
+table(de33_markers$group, de33_markers$dir)
+table(de34_markers$group, de34_markers$dir)
+
+library(Hmisc)
+all_de_num$Celltype<- capitalize(all_de_num$Celltype)
+
+ggplot(all_de_num, aes(x = Celltype, y = Freq))+ geom_col(aes(fill = ApoE), position = "dodge", width = 0.5) + xlab("Cell type") + ylab("Number of DE genes") + coord_flip() + scale_fill_manual(values = c("#AD7700" ,"#1C91D4"))  +  scale_y_continuous(labels = function(x) abs(x), n.breaks = 8) +  theme_bw() + theme(legend.text = element_text( size = 20), legend.title = element_text( size = 20), axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_text(size=20),panel.border = element_blank(),panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +   geom_hline(yintercept = 0,lty=2) + expand_limits(y= 150)
+```
+
+## DGE
+```{r fig.height=7, fig.width=11, echo=FALSE, results = FALSE}
+de33_markers_all$cell_type<- capitalize(de33_markers_all$cell_type)
+de33_markers_all$group<- capitalize(de33_markers_all$group)
+de34_markers_all$cell_type<- capitalize(de34_markers_all$cell_type)
+de34_markers_all$group<- capitalize(de34_markers_all$group)
+
+#Create dataframe for each cell type/apoe group
+for (i in unique(de33_markers_all$cell_type)){
+  for (j in c("33","34")){
+    makedf<- print(paste0(i,j,'_markers<- de',j,'_markers_all[de',j,'_markers_all$group == "',i,j,'",]'), sep='', quote=FALSE)
+  show(eval(expr = parse(text =   makedf)))  
+  }
+}
+
+
+for (i in unique(de33_markers_all$cell_type)){
+    line1<- print(paste0(i,'_markers<- dplyr::full_join(',i,'33_markers[,c(1,5,10)],',i,'34_markers[,c(1,5,10)], by ="gene")'), sep='',quote = FALSE)
+    line2<-print(paste0(i,'_markers$dir<- ifelse(',i,'_markers$avg_logFC.x >0 &',i,'_markers$avg_logFC.y >0, "same","opp")'), sep='',quote = FALSE)
+    line3<-print(paste0(i,'_markers$dir<- ifelse(',i,'_markers$avg_logFC.x <0 &',i,'_markers$avg_logFC.y <0, "same",',i,'_markers$dir)'), sep='',quote = FALSE)
+    line4<-print(paste0(i,'_markers<- na.omit(',i,'_markers)'), sep='',quote = FALSE)
+    line5<-print(paste0(i,'_markers$sig<- ifelse(',i,'_markers$p_val_adj.x <0.05,"<0.05 in APOE3/3","Not Significant")'), sep='',quote = FALSE)
+    line6<-print(paste0(i,'_markers$sig<- ifelse(',i,'_markers$p_val_adj.y <0.05,"<0.05 in APOE3/4",',i,'_markers$sig)'), sep='',quote = FALSE)
+    line7<- print(paste0(i,'_markers$sig<- ifelse(',i,'_markers$p_val_adj.x <0.05 & ',i,'_markers$p_val_adj.y <0.05 &',i,'_markers$dir == "same", "<0.05 in Both & Same Direction", ',i,'_markers$sig)'), sep='',quote = FALSE)
+    line8<- print(paste0(i,'_markers$sig<- ifelse(',i,'_markers$p_val_adj.x <0.05 & ',i,'_markers$p_val_adj.y <0.05 &',i,'_markers$dir == "opp", "<0.05 in Both & Opp Direction", ',i,'_markers$sig)'), sep='',quote = FALSE)
+    line9<- print(paste0(i,'_markers$sig<- as.factor(',i,'_markers$sig)'), sep='',quote = FALSE)
+    line10<-print(paste0(i,'_markers$sigcols<- ifelse(',i,'_markers$sig == "<0.05 in APOE3/3" , "#AD7700", "#636363")'), sep='',quote = FALSE)
+    line11<-print(paste0(i,'_markers$sigcols<- ifelse(',i,'_markers$sig == "<0.05 in APOE3/4" , "#1C91D4",', i,'_markers$sigcols)'), sep='',quote = FALSE)
+    line12<-print(paste0(i,'_markers$sigcols<- ifelse(',i,'_markers$sig == "<0.05 in Both & Opp Direction" , "#CC79A7",', i,'_markers$sigcols)'), sep='',quote = FALSE)
+    line13<-print(paste0(i,'_markers$sigcols<- ifelse(',i,'_markers$sig == "<0.05 in Both & Same Direction" , "#D5C711",', i,'_markers$sigcols)'), sep='',quote = FALSE)
+    line14<-print(paste0(i,'_markers$sigcols<- as.factor(',i,'_markers$sigcols)'), sep='',quote = FALSE)
+    line15<-print(paste0(i,'_markers$sig2<- ifelse(',i,'_markers$sig == "Not Significant" , "0", "1")'), sep='',quote = FALSE)
+    eval(expr = parse(text = c(line1,line2,line3,line4, line5, line6,line7, line8, line9, line10,line11, line12, line13, line14,line15)))
+}
+rm(line1,line2,line3,line4, line5, line6,line7, line8, line9, line10,line11, line12, line13, line14,line15)
+
+```
+
+```{r fig.height=7, fig.width=11}
+marktype<- c("Ast",  "Neu", "Mic", "Oli" , "Opc")
+
+for (i in marktype){
+  p1= print(paste0('table(',i,'_markers$sig)'),sep='', quote=FALSE)
+  eval(expr = parse(text = c(p1)))
+}
+
+#explore range of log fold changes
+for (i in marktype){
+  p1= print(paste0('hist(',i,'_markers$avg_logFC.x)'),sep='', quote=FALSE)
+  p2= print(paste0('hist(',i,'_markers$avg_logFC.y)'),sep='', quote=FALSE)
+  eval(expr = parse(text = c(p1,p2)))
+}
+
+#assign colors
+my_col <- as.character(Ast_markers$sigcols)
+names(my_col) <- as.character(Ast_markers$sig)
+
+# Plots
+ggplot(Ast_markers, aes(x= avg_logFC.x, y=avg_logFC.y, color= sig)) + geom_point(size=0.5, show.legend = FALSE) + labs(title="Astrocytes", color="Adjusted p-value (BH)") + xlab("APOE3/3 AD vs non-AD Log2 FC") + ylab("APOE3/4 AD vs non-AD Log2 FC") + theme_bw() + scale_y_continuous(breaks = seq(-2,4, 1)) + scale_x_continuous(breaks = seq(-2.5,2.5, 0.5)) + theme(panel.border = element_blank(), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + geom_vline(xintercept = 0) +geom_hline(yintercept = 0)+  scale_color_manual(values=my_col) +geom_text(data=subset(Ast_markers,  sig2 == "1" & abs(avg_logFC.x) > 0.25 |sig2 == "1" & abs(avg_logFC.y) > 0.25),  size=7, check_overlap= TRUE, aes(label = gene))+ theme( axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_text(size=30, hjust=0.5)) +expand_limits(x= -1.25) + expand_limits(x= 1)  + geom_vline(xintercept=c(-0.25,0.25), linetype="dotted") + geom_hline(yintercept=c(-0.25,0.25), linetype="dotted") + guides(color = guide_legend(override.aes = list(size=5)),text = guide_legend(label = FALSE)) + theme(legend.position = "none")
+
+ggplot(Mic_markers, aes(x= avg_logFC.x, y=avg_logFC.y, color= sig)) + geom_point(size=0.5) + labs(title="Microglia", color="Adjusted p-value (BH)") + xlab("APOE3/3 AD vs non-AD Log2 FC") + ylab("APOE3/4 AD vs non-AD Log2 FC") + theme_bw() + scale_y_continuous(breaks = seq(-3,3, 1)) + scale_x_continuous(breaks = seq(-1,1, 0.5)) + theme(panel.border = element_blank(), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + geom_vline(xintercept = 0) +geom_hline(yintercept = 0) + scale_color_manual(values= my_col) + geom_text(data=subset(Mic_markers,  sig2 == "1" & abs(avg_logFC.x) > 0.25 |sig2 == "1" & abs(avg_logFC.y) > 0.25),  size=7, check_overlap= TRUE, aes(label = gene)) + theme( axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_text(size=30, hjust=0.5)) +expand_limits(x= -1.25) + expand_limits(x= 1)  + geom_vline(xintercept=c(-0.25,0.25), linetype="dotted") + geom_hline(yintercept=c(-0.25,0.25), linetype="dotted") + guides(color = guide_legend(override.aes = list(size=5)),text = guide_legend(label = FALSE))+ theme(legend.position = "none")
+
+ggplot(Neu_markers, aes(x= avg_logFC.x, y=avg_logFC.y, color= sig)) + geom_point(size=0.5) + labs(title="Neurons", color="Adjusted p-value (BH)") +  xlab("APOE3/3 AD vs non-AD Log2 FC") + ylab("APOE3/4 AD vs non-AD Log2 FC") + theme_bw() + scale_y_continuous(breaks = seq(-2,4, 1)) + scale_x_continuous(breaks = seq(-1,1, 0.5)) + theme(panel.border = element_blank(), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + geom_vline(xintercept = 0) +geom_hline(yintercept = 0) + scale_color_manual(values=my_col) + geom_text(data=subset(Neu_markers, sig2 == "1" & abs(avg_logFC.x) > 0.25 |sig2 == "1" & abs(avg_logFC.y) > 0.25),  size=7, check_overlap= TRUE, aes(label = gene)) + theme( axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_text(size=30, hjust=0.5)) +expand_limits(x= -1.25) + expand_limits(x= 1)  +  geom_vline(xintercept=c(-0.25,0.25), linetype="dotted") + geom_hline(yintercept=c(-0.25,0.25), linetype="dotted") + guides(color = guide_legend(override.aes = list(size=5)),text = guide_legend(label = FALSE))+ theme(legend.position = "none")
+
+ggplot(Oli_markers, aes(x= avg_logFC.x, y=avg_logFC.y, color= sig)) + geom_point(size=0.5) + labs(title="Oligodendrocytes", color="Adjusted p-value (BH)") + xlab("APOE3/3 AD vs non-AD Log2 FC") + ylab("APOE3/4 AD vs non-AD Log2 FC") + theme_bw() + scale_y_continuous(breaks = seq(-2,4, 1)) + scale_x_continuous(breaks = seq(-2,2, 0.5)) + theme(panel.border = element_blank(), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + geom_vline(xintercept = 0) +geom_hline(yintercept = 0) + scale_color_manual(values= my_col) + geom_text(data=subset(Oli_markers, sig2 == "1" & abs(avg_logFC.x) > 0.25 |sig2 == "1" & abs(avg_logFC.y) > 0.25),  size=7, check_overlap= TRUE, aes(label = gene)) + theme( axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_text(size=30, hjust=0.5)) +expand_limits(x= -1.25) + expand_limits(x= 1)  + 
+  geom_vline(xintercept=c(-0.25,0.25), linetype="dotted") + geom_hline(yintercept=c(-0.25,0.25), linetype="dotted") + guides(color = guide_legend(override.aes = list(size=5)),text = guide_legend(label = FALSE))+ theme(legend.position = "none")
+
+ggplot(Opc_markers, aes(x= avg_logFC.x, y=avg_logFC.y, color= sig)) + geom_point(size=0.5) + labs(title="Oligodendrocyte progenitor cells", color="Adjusted p-value (BH)") + xlab("APOE3/3 AD vs non-AD Log2 FC") + ylab("APOE3/4 AD vs non-AD Log2 FC") + theme_bw() + scale_y_continuous(breaks = seq(-1,3, 1)) + scale_x_continuous(breaks = seq(-2,2, 0.5)) + theme(panel.border = element_blank(), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + geom_vline(xintercept = 0) +geom_hline(yintercept = 0) + scale_color_manual(values= my_col) + geom_text(data=subset(Opc_markers,  sig2 == "1" & abs(avg_logFC.x) > 0.25 |sig2 == "1" & abs(avg_logFC.y) > 0.25),  size=7, check_overlap= TRUE, aes(label = gene)) + theme( axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_text(size=30, hjust=0.5)) +expand_limits(x= -1.25) + expand_limits(x= 1)  + 
+  geom_vline(xintercept=c(-0.25,0.25), linetype="dotted") + geom_hline(yintercept=c(-0.25,0.25), linetype="dotted") + guides(color = guide_legend(override.aes = list(size=5)),text = guide_legend(label = FALSE))
+
+rm(Ast33_markers,Mic33_markers,Ex33_markers,In33_markers,Oli33_markers,Opc33_markers,Ast34_markers,Mic34_markers,Ex34_markers,In34_markers,Oli34_markers,Opc34_markers)
+```
+
+## Getting genes with highest logfold change which are in both genotyes (3/3 and 3/4)
+
+```{r fig.height=7, fig.width=7}
+de33_markers<- subset(de33_markers_all, p_val_adj < 0.05 & abs(avg_logFC) > 0.25)
+de34_markers<- subset(de34_markers_all, p_val_adj < 0.05 & abs(avg_logFC) > 0.25)
+math_markers<- rbind(de33_markers,de34_markers)
+
+
+de33 <- subset(de33_markers, gene %in% de34_markers$gene)
+de34 <- subset(de34_markers, gene %in% de33_markers$gene)
+combined <- rbind(de33,de34)
+
+sorted_comb <- combined[order(combined$gene, -abs(combined$avg_logFC)),]
+  
+# removing duplicates from the sorted sub column
+ans <- sorted_comb[!duplicated(sorted_comb$gene),]
+ans_sorted <- ans[order(-abs(ans$avg_logFC)),]
+
+max_genes <- ans_sorted$gene[1:10]
+max_genes
+
+```
+
+## Violin plots for genes with highest log fold change
+```{r fig.height=7, fig.width=7}
+grub$diag_cell<- paste0(grub$Diagnosis,"_",grub$cell_type)
+grub$diag_apoe<- paste0(grub$Diagnosis,"_",grub$ApoE)
+
+
+dittoPlot( grub,  var=max_genes[1] , group.by = "diag_apoe", split.by =  "cell_type",legend.show = FALSE,  x.reorder = c(1,3,2,4), color.panel = c(dittoColors()[36],dittoColors()[29],dittoColors()[28], dittoColors()[26]), split.ncol=5, cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"])  + theme( axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title =  element_blank(),  strip.text = element_text(size = 20))  + theme(legend.text = element_blank(), legend.title =  element_blank(), axis.text.x = element_blank(), axis.title.x=element_blank(), axis.ticks.x = element_blank()) 
+
+dittoPlot( grub,  max_genes[2] , group.by = "diag_apoe", split.by =  "cell_type", legend.show = FALSE,  x.reorder = c(1,3,2,4), color.panel = c(dittoColors()[36],dittoColors()[29],dittoColors()[28], dittoColors()[26]), split.ncol=5 , cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"]) + theme( axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title =  element_blank(),  strip.text = element_text(size = 20))  + theme(legend.text = element_blank(), legend.title =  element_blank(), axis.text.x = element_blank(), axis.title.x=element_blank(), axis.ticks.x = element_blank())
+
+dittoPlot( grub,  max_genes[3] , group.by = "diag_apoe", split.by =  "cell_type",  legend.show = FALSE, x.reorder = c(1,3,2,4), color.panel = c(dittoColors()[36],dittoColors()[29],dittoColors()[28], dittoColors()[26]),  split.ncol=5 , cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"]) + theme( axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),  strip.text = element_text(size = 20)) + theme(legend.text = element_blank(), legend.title =  element_blank(), axis.text.x = element_blank(), axis.title.x=element_blank(), axis.ticks.x = element_blank())
+
+dittoPlot( grub,  max_genes[4] , group.by = "diag_apoe", split.by =  "cell_type", legend.show = FALSE,  x.reorder = c(1,3,2,4), color.panel = c(dittoColors()[36],dittoColors()[29],dittoColors()[28], dittoColors()[26]),  split.ncol=5 , cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"]) + theme( axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),  strip.text = element_text(size = 20))  + theme(legend.text = element_blank(), legend.title =  element_blank(), axis.text.x = element_blank(), axis.title.x=element_blank(), axis.ticks.x = element_blank())
+
+dittoPlot( grub,  max_genes[5] , group.by = "diag_apoe", split.by =  "cell_type",  x.reorder = c(1,3,2,4), color.panel = c(dittoColors()[36],dittoColors()[29],dittoColors()[28], dittoColors()[26]),  split.ncol=5 , cells.use = colnames( grub)[grub$cell_type != "End" & grub$ApoE != "44"]) + theme( axis.text=element_text(size=20), axis.title=element_text(size=20), plot.title = element_blank(),  strip.text = element_text(size = 20))  + theme(legend.text = element_text( size = 20), legend.title =  element_text( "APOE",size = 20), axis.text.x = element_blank(), axis.title.x=element_blank(), axis.ticks.x = element_blank())
+
+```
+
+
+## Heatmap
+```{r  fig.height=7, fig.width=7}
+de33_markers<- subset(de33_markers_all, p_val_adj < 0.05)
+de34_markers<- subset(de34_markers_all, p_val_adj < 0.05)
+grub_markers<- rbind(de33_markers,de34_markers)
+
+grub_markers$group<- capitalize(grub_markers$group)
+grub_markers<- grub_markers[,c(1,10,7)]
+for(ct in unique(grub_markers$group)){
+ new_col<- print(paste0('grub_markers$',ct,'<- ifelse(grub_markers$group == "',ct,'",grub_markers$avg_logFC, 0)'),sep='',quote = FALSE)  
+ eval(expr = parse(text = new_col))
+}
+
+# Remove duplicates
+grub_markers <- grub_markers %>% group_by(gene) %>% mutate(count = n())
+grub_markers<- grub_markers %>%
+   arrange(gene)
+grub_markers<- grub_markers %>%                  # Specify data frame
+  group_by(gene) %>%                             # Specify group indicator
+  summarise_at(vars(colnames(grub_markers[,4:13])),  # Specify column
+               list(name = sum))                        # Specify function
+
+grub_markers<- as.data.frame(grub_markers)
+colnames(grub_markers)[2:11]<-gsub("_name","",colnames(grub_markers[2:11])) 
+rownames(grub_markers)<- grub_markers$gene
+grub_markers$gene<- NULL
+grub_markers<- grub_markers[,c(1,6,2,7,3,8,4,9,5,10)]
+
+anno <- data.frame( Celltype=  factor(colnames(grub_markers)))
+rownames(anno)<- anno$Celltype
+anno$APOE<- str_sub(anno$Celltype, -2,-1)
+anno$Celltype<- str_sub(anno$Celltype, 1,3)
+rownames(anno)<- gsub(33, "_3/3",rownames(anno))
+rownames(anno)<- gsub(34, "_3/4",rownames(anno))
+anno$APOE<- gsub(33, "3/3",anno$APOE)
+anno$APOE<- gsub(34, "3/4",anno$APOE)
+  
+annoc<- list(APOE = c("3/3"= "#AD7700", "3/4" = "#1C91D4"), Celltype=( c("Ast" = "#E69F00", "Neu"= "aquamarine2", "Mic" = "#0072B2", "Oli"="#D55E00","Opc" ="#CC79A7" )))
+colnames(grub_markers)<- gsub(33, "_3/3",colnames(grub_markers))
+colnames(grub_markers)<- gsub(34, "_3/4",colnames(grub_markers))
+rangem <- max(abs(grub_markers));
+
+pheatmap(grub_markers, angle_col= "90", fontsize_row = 12,fontsize_col= 12 , show_rownames = FALSE, show_colnames = FALSE, scale = "none" ,  border_color = "NA",fontsize= 12,annotation_col= anno, annotation_colors = annoc ,color = colorRampPalette(c("gold3", "white", "blue"))(100), breaks = seq(-rangem, rangem, length.out = 100))
+```
+
+## Heatmap of 10 genes with highest log fold change
+```{r fig.height=7, fig.width=7}
+grub2 <- subset(grub, subset= ApoE != "44")
+grub2 <- subset(grub2, subset= cell_type != "End")
+
+dittoHeatmap(grub2, c("DOCK4", "LINC00486", "NEAT1", "CRYAB", "FRMD4A", "DPP10", "HSPA1A","CNTNAP2", "ROBO2", "PPP2R2B" ),
+    annot.by = c( "cell_type", "ApoE"), order.by = c("ApoE", "cell_type"), heatmap.colors =colorRampPalette(c("gold3", "white", "blue"))(100), complex=TRUE, treeheight_row=30,  annotation_colors = list(ApoE = c("3/3"= "#AD7700", "3/4" = "#1C91D4"), cell_type=( c("Ast" = "#E69F00", "Neu"= "aquamarine2", "Mic" = "#0072B2", "Oli"="#D55E00","Opc" ="#CC79A7" ))))
+```
+
+## Intersections of differentialy expressed genes
+
+### APOE 3/3 cell types
+
+```{r fig.height=7, fig.width=7}
+library(grid)
+de33.list1<-list( Ast= de33_markers$gene[de33_markers$cell_type == "Ast"],
+                  Mic= de33_markers$gene[de33_markers$cell_type == "Mic"],
+                 Neu= de33_markers$gene[de33_markers$cell_type == "Neu"],
+                 Oli= de33_markers$gene[de33_markers$cell_type == "Oli"],
+                 Opc= de33_markers$gene[de33_markers$cell_type == "Opc"])
+de33.list2<-list(Ast_up = de33_markers$gene[de33_markers$cell_type == "Ast" & de33_markers$dir == "pos"],
+                 Mic_up = de33_markers$gene[de33_markers$cell_type == "Mic" & de33_markers$dir == "pos"],
+                Neu_up = de33_markers$gene[de33_markers$cell_type == "Neu" & de33_markers$dir == "pos"],
+                Oli_up = de33_markers$gene[de33_markers$cell_type == "Oli" & de33_markers$dir == "pos"], 
+                Opc_up = de33_markers$gene[de33_markers$cell_type == "Opc" & de33_markers$dir == "pos"])
+ 
+de33.list3<-list(Ast_down =  de33_markers$gene[de33_markers$cell_type == "Ast" & de33_markers$dir != "pos"],
+                 Mic_down =   de33_markers$gene[de33_markers$cell_type == "Mic" & de33_markers$dir != "pos"],
+               Neu_down = de33_markers$gene[de33_markers$cell_type == "Neu" & de33_markers$dir != "pos"], 
+               Oli_down =  de33_markers$gene[de33_markers$cell_type == "Oli" & de33_markers$dir != "pos"], 
+               Opc_down =  de33_markers$gene[de33_markers$cell_type == "Opc" & de33_markers$dir != "pos"])
+#c(intersection size title, intersection size tick labels, set size title, set size tick labels, set names, numbers above bars).
+upset(fromList(de33.list1), sets = c("Opc","Oli", "Neu", "Mic", "Ast" ), keep.order = TRUE,order.by = "freq",  mainbar.y.label = "Gene Intersections", nsets=6,sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 2.25, 2.25, 2.25)) 
+grid.text("Shared and unique AD vs non-AD DEGs across APOE3/3 cell types",x = 0.54, y=0.967, gp=gpar(fontsize=12))
+
+upset(fromList(de33.list2), sets = c("Opc_up","Oli_up", "Neu_up", "Mic_up", "Ast_up" ), keep.order = TRUE, order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 2.25, 2.25, 2.25)) 
+grid.text("Shared and unique upregulated AD vs non-AD DEGs across APOE3/3 cell types",x = 0.54, y=0.98, gp=gpar(fontsize=12))
+
+upset(fromList(de33.list3), sets = c("Opc_down","Oli_down", "Neu_down", "Mic_down", "Ast_down" ), keep.order = TRUE, order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 2.25, 2.25, 2.25)) 
+grid.text("Shared and unique downregulated AD vs non-AD DEGs across APOE3/3 cell types",x = 0.54, y=0.98, gp=gpar(fontsize=12))
+
+```
+
+### APOE 3/4 cell types
+
+```{r fig.height=7, fig.width=7}
+
+de34.list1<-list(Mic = de34_markers$gene[de34_markers$cell_type == "Mic"],
+                 Ast= de34_markers$gene[de34_markers$cell_type == "Ast"],
+                 Neu = de34_markers$gene[de34_markers$cell_type == "Neu"],
+                 Oli = de34_markers$gene[de34_markers$cell_type == "Oli"],
+                 Opc = de34_markers$gene[de34_markers$cell_type == "Opc"])
+de34.list2<-list(Mic_up =  de34_markers$gene[de34_markers$cell_type == "Mic" & de34_markers$dir == "pos"], 
+                Ast_up =  de34_markers$gene[de34_markers$cell_type == "Ast" & de34_markers$dir == "pos"], 
+                Neu_up = de34_markers$gene[de34_markers$cell_type == "Neu" & de34_markers$dir == "pos"], 
+                 Oli_up = de34_markers$gene[de34_markers$cell_type == "Oli" & de34_markers$dir == "pos"], 
+                 Opc_up = de34_markers$gene[de34_markers$cell_type == "Opc" & de34_markers$dir == "pos"])
+             
+de34.list3<-list( Mic_down = de34_markers$gene[de34_markers$cell_type == "Mic" & de34_markers$dir != "pos"], 
+                Ast_down = de34_markers$gene[de34_markers$cell_type == "Ast" & de34_markers$dir != "pos"], 
+               Neu_down = de34_markers$gene[de34_markers$cell_type == "Neu" & de34_markers$dir != "pos"], 
+                Oli_down = de34_markers$gene[de34_markers$cell_type == "Oli" & de34_markers$dir != "pos"], 
+                Opc_down = de34_markers$gene[de34_markers$cell_type == "Opc" & de34_markers$dir != "pos"])
+                
+
+upset(fromList(de34.list1), sets = c("Opc","Oli", "Neu", "Mic", "Ast" ), keep.order = TRUE, order.by = "freq",  mainbar.y.label = "Gene Intersections", nsets=6,sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 2.25, 2.25, 1.9)) 
+grid.text("Shared and unique AD vs non-AD DEGs across APOE3/4 cell types",x = 0.54, y=0.967, gp=gpar(fontsize=13))
+
+upset(fromList(de34.list2), sets = c("Opc_up","Oli_up", "Neu_up", "Mic_up", "Ast_up" ), keep.order = TRUE, order.by = "freq",  mainbar.y.label = "Gene Intersections", nsets=6, sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 2.25, 2.25, 2.25)) 
+grid.text("Shared and unique upregulated AD vs non-AD DEGs across APOE3/4 cell types",x = 0.54, y=0.967, gp=gpar(fontsize=13))
+
+upset(fromList(de34.list3),  sets = c("Opc_down","Oli_down", "Neu_down", "Mic_down", "Ast_down" ), keep.order = TRUE, order.by = "freq",  mainbar.y.label = "Gene Intersections", nsets=6,sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 2.25, 2.25, 1.9)) 
+grid.text("Shared and unique downregulated AD vs non-AD DEGs across APOE3/4 cell types",x = 0.54, y=0.97, gp=gpar(fontsize=13))
+
+de33_markers<- subset(de33_markers_all, p_val_adj < 0.05 & abs(avg_logFC) > 0.25)
+de34_markers<- subset(de34_markers_all, p_val_adj < 0.05 & abs(avg_logFC) > 0.25)
+math_markers<- rbind(de33_markers,de34_markers)
+table(math_markers$group, math_markers$dir)
+
+gene33_count<-as.data.frame(table(de33_markers$gene))  
+colnames(gene33_count)<- c("gene","gene33_count")
+de33_markers2<- dplyr::inner_join(de33_markers,gene33_count, by="gene") 
+ 
+
+gene34_count<-as.data.frame(table(de34_markers$gene)) 
+colnames(gene34_count)<- c("gene","gene34_count")
+de34_markers2<- dplyr::inner_join(de34_markers,gene34_count, by="gene") 
+
+#Join 33 and 34, group by celltype, then count to determine overlapping genes within cell types
+colnames(de33_markers2)[12]<-"gene_count"
+colnames(de34_markers2)[12]<- "gene_count"
+
+all.de.markers<- rbind(de33_markers2, de34_markers2) #327
+all.de.markers$cell_gene<- paste0(all.de.markers$cell_type,"-", all.de.markers$gene)
+gene_ct_count<-as.data.frame(table(all.de.markers$cell_gene))
+colnames(gene_ct_count)<- c("cell_gene", "gene_ct_count")
+all.de.markers<- dplyr::inner_join(all.de.markers,gene_ct_count, by="cell_gene") 
+
+table(all.de.markers$cell_type, all.de.markers$ApoE)
+table(all.de.markers$group, all.de.markers$dir)
+```
+
+### Cell types between different APOE genotypes and up and down regulated genes
+
+```{r fig.height=7, fig.width=7}
+#Ast
+ast.de.list<- list( "Ast_3/3_up" = de33_markers$gene[de33_markers$cell_type == "Ast"& de33_markers$dir == "pos"],
+                    "Ast_3/4_up" = de34_markers$gene[de34_markers$cell_type == "Ast"& de34_markers$dir == "pos"],
+                    "Ast_3/3_down" = de33_markers$gene[de33_markers$cell_type == "Ast"& de33_markers$dir != "pos"],
+                    "Ast_3/4_down" = de34_markers$gene[de34_markers$cell_type == "Ast"& de34_markers$dir != "pos"])
+upset(fromList(ast.de.list), sets = c("Ast_3/4_down", "Ast_3/4_up","Ast_3/3_down","Ast_3/3_up"), keep.order = TRUE, order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 2.25, 2.25, 2))  
+grid.text("Astrocytes",x = 0.67, y=0.98, gp=gpar(fontsize=20))
+
+#Mic
+mic.de.list<- list( "Mic_3/3_up" = de33_markers$gene[de33_markers$cell_type == "Mic"& de33_markers$dir == "pos"],
+                    "Mic_3/4_up" = de34_markers$gene[de34_markers$cell_type == "Mic"& de34_markers$dir == "pos"], 
+                     "Mic_3/3_down" = de33_markers$gene[de33_markers$cell_type == "Mic"& de33_markers$dir != "pos"],
+                    "Mic_3/4_down" = de34_markers$gene[de34_markers$cell_type == "Mic"& de34_markers$dir != "pos"])
+upset(fromList(mic.de.list), sets = c("Mic_3/4_down", "Mic_3/4_up","Mic_3/3_down","Mic_3/3_up"), keep.order = TRUE,order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label ="Number of DEGs",  text.scale = c(2.25, 2.25, 1.9, 2.25, 2.25, 1.9))  
+grid.text("Microglia",x = 0.67, y=0.98, gp=gpar(fontsize=20))
+
+#Neu
+neu.de.list<- list( "Neu_3/3_up" = de33_markers$gene[de33_markers$cell_type == "Neu"& de33_markers$dir == "pos"], 
+                    "Neu_3/4_up" = de34_markers$gene[de34_markers$cell_type == "Neu"& de34_markers$dir == "pos"], 
+                     "Neu_3/3_down" = de33_markers$gene[de33_markers$cell_type == "Neu"& de33_markers$dir != "pos"], 
+                    "Neu_3/4_down" = de34_markers$gene[de34_markers$cell_type == "Neu"& de34_markers$dir != "pos"])
+upset(fromList(neu.de.list), sets = c("Neu_3/4_down","Neu_3/4_up","Neu_3/3_down","Neu_3/3_up"), keep.order = TRUE,order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 2.25, 2.25, 2))  
+grid.text("Neurons",x = 0.67, y=0.98, gp=gpar(fontsize=20))
+
+#Oli
+oli.de.list<- list( "Oli_3/3_up" = de33_markers$gene[de33_markers$cell_type == "Oli"& de33_markers$dir == "pos"], 
+                    "Oli_3/4_up" = de34_markers$gene[de34_markers$cell_type == "Oli"& de34_markers$dir == "pos"],
+                    "Oli_3/3_down" = de33_markers$gene[de33_markers$cell_type == "Oli"& de33_markers$dir != "pos"], 
+                    "Oli_3/4_down" = de34_markers$gene[de34_markers$cell_type == "Oli"& de34_markers$dir != "pos"])
+upset(fromList(oli.de.list),sets = c("Oli_3/4_down","Oli_3/4_up","Oli_3/3_down","Oli_3/3_up"), keep.order = TRUE, order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 2.25, 2.25, 2.25))  
+grid.text("Oligodendrocytes",x = 0.67, y=0.98, gp=gpar(fontsize=20))
+
+#Opc
+opc.de.list<- list( "Opc_3/3_up" = de33_markers$gene[de33_markers$cell_type == "Opc"& de33_markers$dir == "pos"],
+                    "Opc_3/4_up" = de34_markers$gene[de34_markers$cell_type == "Opc"& de34_markers$dir == "pos"], 
+                    "Opc_3/3_down" = de33_markers$gene[de33_markers$cell_type == "Opc"& de33_markers$dir != "pos"],
+                    "Opc_3/4_down" = de34_markers$gene[de34_markers$cell_type == "Opc"& de34_markers$dir != "pos"])
+ upset(fromList(opc.de.list), sets = c("Opc_3/4_down","Opc_3/4_up","Opc_3/3_down","Opc_3/3_up"), keep.order = TRUE,order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label = "Number of DEGs",  text.scale = c(2.25, 2.25, 1.9, 2.25, 2.25, 2.25))  
+grid.text("Oligodendrocyte progenitor cells",x = 0.72, y=0.98, gp=gpar(fontsize=18))
+
+```
+
+### Cell types between different ApoE genotypes
+
+```{r fig.height=7, fig.width=7}
+#Ast
+ast.de.list<- list( "Ast_3/3" = de33_markers$gene[de33_markers$cell_type == "Ast"],
+                    "Ast_3/4" = de34_markers$gene[de34_markers$cell_type == "Ast"] )
+upset(fromList(ast.de.list),  sets = c("Ast_3/4","Ast_3/3"), keep.order = TRUE, order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 1.9, 2.25, 2))  
+grid.text("Astrocytes",x = 0.67, y=0.98, gp=gpar(fontsize=20))
+
+#Mic
+mic.de.list<- list( "Mic_3/3" = de33_markers$gene[de33_markers$cell_type == "Mic"],
+                    "Mic_3/4" = de34_markers$gene[de34_markers$cell_type == "Mic"] )
+upset(fromList(mic.de.list), sets = c("Mic_3/4","Mic_3/3"), keep.order = TRUE,order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label ="Number of DEGs",  text.scale = c(2.25, 2.25, 1.9, 1.9, 2.25, 2))  
+grid.text("Microglia",x = 0.67, y=0.98, gp=gpar(fontsize=20))
+
+#Neu
+neu.de.list<- list( "Neu_3/3" = de33_markers$gene[de33_markers$cell_type == "Neu"],
+                      "Neu_3/4" = de34_markers$gene[de34_markers$cell_type == "Neu"] )
+upset(fromList(neu.de.list),sets = c("Neu_3/4","Neu_3/3"), keep.order = TRUE, order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 1.9, 2.25, 2))  
+grid.text("Neurons",x = 0.67, y=0.98, gp=gpar(fontsize=20))
+
+#Oli
+oli.de.list<- list( "Oli_3/3" = de33_markers$gene[de33_markers$cell_type == "Oli"], 
+                    "Oli_3/4" = de34_markers$gene[de34_markers$cell_type == "Oli"] )
+upset(fromList(oli.de.list), sets = c("Oli_3/4","Oli_3/3"), keep.order = TRUE, order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label = "Number of DEGs", text.scale = c(2.25, 2.25, 1.9, 1.9, 2.25, 2.25))  
+grid.text("Oligodendrocytes",x = 0.67, y=0.98, gp=gpar(fontsize=20))
+
+#Opc
+opc.de.list<- list( "Opc_3/3" = de33_markers$gene[de33_markers$cell_type == "Opc"],
+                   "Opc_3/4" = de34_markers$gene[de34_markers$cell_type == "Opc"] )
+ upset(fromList(opc.de.list), sets = c("Opc_3/4","Opc_3/3"), keep.order = TRUE, order.by = "freq",  mainbar.y.label = "Gene Intersections", sets.x.label = "Number of DEGs",  text.scale = c(2.25, 2.25, 1.9, 1.9, 2.25, 2.25))  
+grid.text("Oligodendrocyte progenitor cells",x = 0.71, y=0.98, gp=gpar(fontsize=18))
+```
+
