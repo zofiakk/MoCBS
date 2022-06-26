@@ -1,3 +1,3 @@
-Modeling of Complex Biological Systems- Final Project
+# Modeling of Complex Biological Systems- Final Project
 
-Kochańska Zofia
+## Kochańska Zofia
